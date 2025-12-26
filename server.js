@@ -51,17 +51,138 @@ console.log(`[System] Password mode: ${ACCESS_PASSWORDS.length > 1 ? 'Multi-user
 // 远程配置URL
 const REMOTE_DB_URL = process.env['REMOTE_DB_URL'] || '';
 
+// CORS 代理 URL（用于中转无法直接访问的资源站 API）
+const CORS_PROXY_URL = process.env['CORS_PROXY_URL'] || '';
+
 // 环境变量加载状态日志（用于 Vercel 调试）
 console.log(`[System] Environment: ${process.env.VERCEL ? 'Vercel Serverless' : 'Local/VPS'}`);
 console.log(`[System] TMDB_API_KEY: ${process.env.TMDB_API_KEY ? '✓ Configured' : '✗ Missing'}`);
 console.log(`[System] TMDB_PROXY_URL: ${process.env['TMDB_PROXY_URL'] || '(not set)'}`);
+console.log(`[System] CORS_PROXY_URL: ${CORS_PROXY_URL || '(not set)'}`);
 console.log(`[System] REMOTE_DB_URL: ${REMOTE_DB_URL ? '✓ Configured' : '(not set)'}`);
+
 
 
 // 远程配置缓存
 let remoteDbCache = null;
 let remoteDbLastFetch = 0;
 const REMOTE_DB_CACHE_TTL = 5 * 60 * 1000; // 5分钟缓存
+
+// 记录需要使用代理的站点（自动学习，带过期时间）
+// 格式：{ siteKey: expireTimestamp }
+const proxyRequiredSites = new Map();
+const PROXY_MEMORY_TTL = 24 * 60 * 60 * 1000; // 24小时后重新尝试直连
+const SLOW_THRESHOLD_MS = 1500; // 直连延迟超过此值视为慢速，尝试代理
+
+/**
+ * 检查站点是否需要使用代理（未过期）
+ */
+function shouldUseProxy(siteKey) {
+    if (!proxyRequiredSites.has(siteKey)) return false;
+    const expireTime = proxyRequiredSites.get(siteKey);
+    if (Date.now() > expireTime) {
+        // 已过期，移除记录，下次会重新尝试直连
+        proxyRequiredSites.delete(siteKey);
+        console.log(`[Proxy Memory] ${siteKey} 代理记录已过期，将重新尝试直连`);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * 标记站点需要使用代理
+ */
+function markSiteNeedsProxy(siteKey, reason = '') {
+    const expireTime = Date.now() + PROXY_MEMORY_TTL;
+    proxyRequiredSites.set(siteKey, expireTime);
+    const expireDate = new Date(expireTime).toLocaleString('zh-CN');
+    console.log(`[Proxy Memory] ${siteKey} 已标记为需要代理${reason ? ` (${reason})` : ''}，有效期至 ${expireDate}`);
+}
+
+/**
+ * 带代理回退的请求函数
+ * 先尝试直接请求，失败或太慢时通过 CORS 代理重试
+ * @param {string} url - 请求 URL
+ * @param {object} options - axios 配置
+ * @param {string} siteKey - 站点标识（用于记忆）
+ * @returns {Promise<object>} - { data, usedProxy, latency }
+ */
+async function fetchWithProxyFallback(url, options = {}, siteKey = '') {
+    const timeout = options.timeout || 8000;
+
+    // 如果该站点之前需要代理且未过期，直接使用代理
+    if (CORS_PROXY_URL && siteKey && shouldUseProxy(siteKey)) {
+        try {
+            const startTime = Date.now();
+            const proxyUrl = `${CORS_PROXY_URL}/?url=${encodeURIComponent(url)}`;
+            const response = await axios.get(proxyUrl, { ...options, timeout });
+            const latency = Date.now() - startTime;
+            return { data: response.data, usedProxy: true, latency };
+        } catch (proxyError) {
+            // 代理也失败，移除记忆，下次重新尝试直连
+            proxyRequiredSites.delete(siteKey);
+            console.log(`[Proxy Fallback] ${siteKey} 代理失败，已清除记录`);
+            throw proxyError;
+        }
+    }
+
+    // 尝试直接请求
+    const startTime = Date.now();
+    try {
+        const response = await axios.get(url, { ...options, timeout });
+        const directLatency = Date.now() - startTime;
+
+        // 检查是否太慢，如果配置了代理，尝试代理看是否更快
+        if (CORS_PROXY_URL && directLatency > SLOW_THRESHOLD_MS) {
+            console.log(`[Proxy Fallback] ${siteKey || url} 直连较慢 (${directLatency}ms)，尝试代理对比...`);
+
+            try {
+                const proxyStartTime = Date.now();
+                const proxyUrl = `${CORS_PROXY_URL}/?url=${encodeURIComponent(url)}`;
+                const proxyResponse = await axios.get(proxyUrl, { ...options, timeout: timeout + 2000 });
+                const proxyLatency = Date.now() - proxyStartTime;
+
+                // 如果代理更快（至少快 30%），使用代理结果并记住
+                if (proxyLatency < directLatency * 0.7) {
+                    console.log(`[Proxy Fallback] ${siteKey || url} 代理更快 (${proxyLatency}ms vs ${directLatency}ms)，使用代理`);
+                    if (siteKey) {
+                        markSiteNeedsProxy(siteKey, `代理更快: ${proxyLatency}ms vs 直连 ${directLatency}ms`);
+                    }
+                    return { data: proxyResponse.data, usedProxy: true, latency: proxyLatency };
+                } else {
+                    console.log(`[Proxy Fallback] ${siteKey || url} 直连仍更快 (${directLatency}ms vs ${proxyLatency}ms)，继续使用直连`);
+                }
+            } catch (proxyError) {
+                // 代理失败，继续使用直连结果
+                console.log(`[Proxy Fallback] ${siteKey || url} 代理测试失败，继续使用直连`);
+            }
+        }
+
+        return { data: response.data, usedProxy: false, latency: directLatency };
+    } catch (directError) {
+        // 直接请求失败，如果配置了代理，尝试通过代理
+        if (CORS_PROXY_URL) {
+            try {
+                console.log(`[Proxy Fallback] ${siteKey || url} 直连失败，尝试代理...`);
+                const proxyStartTime = Date.now();
+                const proxyUrl = `${CORS_PROXY_URL}/?url=${encodeURIComponent(url)}`;
+                const response = await axios.get(proxyUrl, { ...options, timeout: timeout + 2000 });
+                const proxyLatency = Date.now() - proxyStartTime;
+
+                // 记住该站点需要代理（带过期时间）
+                if (siteKey) {
+                    markSiteNeedsProxy(siteKey, '直连失败');
+                }
+
+                return { data: response.data, usedProxy: true, latency: proxyLatency };
+            } catch (proxyError) {
+                console.error(`[Proxy Fallback] ${siteKey || url} 代理请求也失败:`, proxyError.message);
+                throw proxyError;
+            }
+        }
+        throw directError;
+    }
+}
 
 // 缓存配置
 const CACHE_TYPE = process.env.CACHE_TYPE || 'json'; // json, sqlite, memory, none
@@ -241,27 +362,31 @@ app.use(bodyParser.json());
 // ========== API 速率限制 ==========
 const rateLimit = require('express-rate-limit');
 
-// 通用 API 限流：每 IP 每分钟最多 300 次请求
-// 注意：页面加载时会发送多个请求，多设备需要更高的限制
+// 通用 API 限流：每 IP 每分钟最多 600 次请求
+// 注意：页面加载时会发送大量图片和 API 请求，需要足够高的限制
 const apiLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 分钟窗口
-    max: 300, // 每 IP 最多 300 次（约 5 次/秒）
+    max: 600, // 每 IP 最多 600 次（约 10 次/秒）
     standardHeaders: true, // 返回 RateLimit-* 标准头
     legacyHeaders: false, // 禁用 X-RateLimit-* 旧头
     message: { error: '请求过于频繁，请稍后再试 (Rate limit exceeded)' },
     skip: (req) => {
-        // 跳过静态资源请求和基础配置请求
+        // 跳过静态资源请求
         if (!req.path.startsWith('/api/')) return true;
-        // 配置和认证请求不限流（页面加载必需）
+        // 配置、认证、站点列表请求不限流（页面加载必需）
         if (req.path === '/api/config' || req.path.startsWith('/api/auth/') || req.path === '/api/sites') return true;
+        // 图片代理请求不限流（前端有大量图片）
+        if (req.path.startsWith('/api/tmdb-image/')) return true;
+        // TMDB 代理请求不限流
+        if (req.path === '/api/tmdb-proxy') return true;
         return false;
     }
 });
 
-// 搜索 API 更严格的限流：每 IP 每分钟最多 60 次搜索
+// 搜索 API 更严格的限流：每 IP 每分钟最多 120 次搜索
 const searchLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 60,
+    max: 120,
     message: { error: '搜索请求过于频繁，请稍后再试' }
 });
 
@@ -316,6 +441,8 @@ app.get('/api/config', (req, res) => {
     res.json({
         tmdb_api_key: process.env.TMDB_API_KEY,
         tmdb_proxy_url: process.env['TMDB_PROXY_URL'],
+        // CORS 代理 URL（用于中转无法直接访问的资源站 API）
+        cors_proxy_url: CORS_PROXY_URL || null,
         // Vercel 环境下禁用本地图片缓存，防止写入报错
         enable_local_image_cache: !IS_VERCEL,
         // 多用户同步功能
@@ -580,12 +707,17 @@ app.get('/api/search', async (req, res) => {
 
         try {
             console.log(`[SSE Search] ${site.name} -> ${keyword}`);
-            const response = await axios.get(site.api, {
-                params: { ac: 'detail', wd: keyword },
-                timeout: 8000
-            });
 
-            const data = response.data;
+            // 构建请求 URL（带参数）
+            const searchUrl = `${site.api}?ac=detail&wd=${encodeURIComponent(keyword)}`;
+
+            // 使用带代理回退的请求
+            const { data, usedProxy } = await fetchWithProxyFallback(searchUrl, { timeout: 8000 }, site.key);
+
+            if (usedProxy) {
+                console.log(`[SSE Search] ${site.name} 通过代理获取结果`);
+            }
+
             const list = data.list ? data.list.map(item => ({
                 vod_id: item.vod_id,
                 vod_name: item.vod_name,
@@ -639,12 +771,11 @@ app.post('/api/search', async (req, res) => {
 
     try {
         console.log(`[Search] ${site.name} -> ${keyword}`);
-        const response = await axios.get(site.api, {
-            params: { ac: 'detail', wd: keyword },
-            timeout: 8000
-        });
 
-        const data = response.data;
+        // 构建请求 URL
+        const searchUrl = `${site.api}?ac=detail&wd=${encodeURIComponent(keyword)}`;
+        const { data } = await fetchWithProxyFallback(searchUrl, { timeout: 8000 }, site.key);
+
         // 简单的数据清洗
         const result = {
             list: data.list ? data.list.map(item => ({
@@ -684,12 +815,11 @@ app.get('/api/detail', async (req, res) => {
 
     try {
         console.log(`[Detail] ${site.name} -> ID: ${id}`);
-        const response = await axios.get(site.api, {
-            params: { ac: 'detail', ids: id },
-            timeout: 8000
-        });
 
-        const data = response.data;
+        // 构建请求 URL
+        const detailUrl = `${site.api}?ac=detail&ids=${encodeURIComponent(id)}`;
+        const { data } = await fetchWithProxyFallback(detailUrl, { timeout: 8000 }, site.key);
+
         if (data.list && data.list.length > 0) {
             const detail = data.list[0];
             cacheManager.set('detail', cacheKey, detail, 3600); // 缓存1小时
@@ -721,12 +851,11 @@ app.post('/api/detail', async (req, res) => {
 
     try {
         console.log(`[Detail] ${site.name} -> ID: ${id}`);
-        const response = await axios.get(site.api, {
-            params: { ac: 'detail', ids: id },
-            timeout: 8000
-        });
 
-        const data = response.data;
+        // 构建请求 URL
+        const detailUrl = `${site.api}?ac=detail&ids=${encodeURIComponent(id)}`;
+        const { data } = await fetchWithProxyFallback(detailUrl, { timeout: 8000 }, siteKey);
+
         if (data.list && data.list.length > 0) {
             const detail = data.list[0];
             cacheManager.set('detail', cacheKey, detail, 3600); // 缓存1小时

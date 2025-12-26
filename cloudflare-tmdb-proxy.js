@@ -61,19 +61,45 @@ export default {
         }
 
         try {
-            // 发起代理请求
-            const response = await fetch(targetUrl, {
-                method: request.method,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': request.headers.get('Accept') || '*/*',
-                },
-                cf: {
-                    // Cloudflare 缓存设置
-                    cacheTtl: path.startsWith('/t/') ? 86400 : 300, // 图片缓存1天，API缓存5分钟
-                    cacheEverything: true,
-                }
+            // 检查是否是图片请求，使用不同的缓存策略
+            const isImageRequest = path.startsWith('/t/');
+
+            // 构建缓存键（确保相同请求使用相同缓存）
+            const cacheKey = new Request(targetUrl, {
+                method: 'GET',
+                headers: { 'Accept': isImageRequest ? 'image/*' : 'application/json' }
             });
+
+            // 尝试从 Cloudflare Cache 获取
+            const cache = caches.default;
+            let response = await cache.match(cacheKey);
+
+            if (!response) {
+                // 缓存未命中，发起请求
+                response = await fetch(targetUrl, {
+                    method: request.method,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': request.headers.get('Accept') || '*/*',
+                    }
+                });
+
+                // 只缓存成功的响应
+                if (response.ok) {
+                    const responseToCache = response.clone();
+                    const cacheHeaders = new Headers(responseToCache.headers);
+                    // 图片缓存 7 天，API 缓存 10 分钟
+                    cacheHeaders.set('Cache-Control', isImageRequest ? 'public, max-age=604800' : 'public, max-age=600');
+
+                    const cachedResponse = new Response(responseToCache.body, {
+                        status: responseToCache.status,
+                        headers: cacheHeaders
+                    });
+
+                    // 异步存入缓存，不阻塞响应
+                    ctx.waitUntil(cache.put(cacheKey, cachedResponse));
+                }
+            }
 
             // 克隆响应并添加 CORS 头
             const newHeaders = new Headers(response.headers);
@@ -81,9 +107,9 @@ export default {
                 newHeaders.set(key, value);
             });
 
-            // 对于图片，添加缓存控制
-            if (path.startsWith('/t/')) {
-                newHeaders.set('Cache-Control', 'public, max-age=86400'); // 1天
+            // 对于图片，添加更长的缓存控制
+            if (isImageRequest) {
+                newHeaders.set('Cache-Control', 'public, max-age=604800'); // 7天
             }
 
             return new Response(response.body, {

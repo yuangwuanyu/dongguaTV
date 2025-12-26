@@ -4,6 +4,20 @@ on:
   push:
     tags:
       - 'v*.*.*'  # 只在推送版本标签时触发
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: 'Server URL (e.g. https://your-site.com)'
+        required: true
+        default: 'https://ednovas.video'
+      app_name:
+        description: 'App Name'
+        required: true
+        default: 'E视界'
+      version_tag:
+        description: 'Version Tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
 
 jobs:
   build:
@@ -41,6 +55,20 @@ jobs:
             echo "<html><body>E视界</body></html>" > www/index.html
           fi
           echo "Created www directory manually as fallback"
+
+      # 仅在手动触发时修改配置
+      - name: Configure App (Manual Build)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          echo "📝 Applying manual configuration..."
+          # 使用 jq 修改 JSON (ubuntu-latest 预装了 jq)
+          tmp=$(mktemp)
+          jq --arg url "${{ inputs.server_url }}" --arg name "${{ inputs.app_name }}" \
+             '.server.url = $url | .appName = $name' capacitor.config.json > "$tmp" && mv "$tmp" capacitor.config.json
+          
+          echo "✅ Configuration updated:"
+          echo "   App Name: ${{ inputs.app_name }}"
+          echo "   Server URL: ${{ inputs.server_url }}"
 
       # 显示当前 Capacitor 配置
       - name: Show Capacitor Config
@@ -164,9 +192,16 @@ jobs:
           echo "=== APK Details ==="
           ls -lh android/app/build/outputs/apk/release/ || echo "No release APKs found"
 
-      - name: Get version from tag
+      - name: Get version from tag or input
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "VERSION=${{ inputs.version_tag }}" >> $GITHUB_OUTPUT
+            echo "Using manual version: ${{ inputs.version_tag }}"
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "Using tag version: ${GITHUB_REF#refs/tags/}"
+          fi
 
       - name: Rename APK with version
         run: |

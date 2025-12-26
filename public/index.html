@@ -2577,8 +2577,8 @@
                             </div>
                             <div class="poster-wrap" @click="playFromHistory(item)">
                                 <img :src="item.poster" :alt="item.name"
-                                    @load="$event.target.classList.add('loaded'); $event.target.parentElement.classList.add('img-loaded')"
-                                    @error="$event.target.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27150%27 height=%27225%27%3E%3Crect fill=%27%23333%27 width=%27150%27 height=%27225%27/%3E%3C/svg%3E'; $event.target.classList.add('loaded'); $event.target.parentElement.classList.add('img-loaded')"
+                                    @load="$event.target.classList.add('loaded'); $event.target.parentElement && $event.target.parentElement.classList.add('img-loaded')"
+                                    @error="$event.target.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27150%27 height=%27225%27%3E%3Crect fill=%27%23333%27 width=%27150%27 height=%27225%27/%3E%3C/svg%3E'; $event.target.classList.add('loaded'); $event.target.parentElement && $event.target.parentElement.classList.add('img-loaded')"
                                     loading="lazy">
                                 <!-- 进度条 -->
                                 <div
@@ -2720,8 +2720,8 @@
                     <div class="poster-wrap">
                         <img v-if="!isFallback(group.name)" :src="finalPoster(group)" :key="finalPoster(group)"
                             referrerpolicy="no-referrer" loading="lazy"
-                            @load="$event.target.classList.add('loaded'); $event.target.parentElement.classList.add('img-loaded')"
-                            @error="handleImgError(group.name); $event.target.classList.add('loaded'); $event.target.parentElement.classList.add('img-loaded')">
+                            @load="$event.target.classList.add('loaded'); $event.target.parentElement && $event.target.parentElement.classList.add('img-loaded')"
+                            @error="handleImgError(group.name); $event.target.classList.add('loaded'); $event.target.parentElement && $event.target.parentElement.classList.add('img-loaded')">
                         <div v-else class="poster-fallback">
                             <i class="fas fa-film mb-2 opacity-50"></i>
                             <div style="font-size:12px; color:#999">{{ group.name }}</div>
@@ -2860,12 +2860,17 @@
                             <span style="display: flex; align-items: center; gap: 4px;">
                                 <span
                                     style="background: linear-gradient(135deg, #10b981, #059669); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px;">直连</span>
-                                用户端测速（更准确）
+                                用户端直接访问
                             </span>
                             <span style="display: flex; align-items: center; gap: 4px;">
                                 <span
-                                    style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px;">代理</span>
-                                服务器测速
+                                    style="background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px;">中转</span>
+                                通过代理访问
+                            </span>
+                            <span style="display: flex; align-items: center; gap: 4px;">
+                                <span
+                                    style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px;">服务</span>
+                                服务器端测速
                             </span>
                         </div>
 
@@ -2882,9 +2887,13 @@
                                     style="background: linear-gradient(135deg, #10b981, #059669); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px; margin-left: 4px;">
                                     直连
                                 </span>
+                                <span v-else-if="source._testType === 'proxy'"
+                                    style="background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px; margin-left: 4px;">
+                                    中转
+                                </span>
                                 <span v-else
                                     style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px; margin-left: 4px;">
-                                    代理
+                                    服务
                                 </span>
                             </div>
                             <!-- 慢速线路分隔符 -->
@@ -2903,9 +2912,13 @@
                                     style="background: linear-gradient(135deg, #10b981, #059669); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px; margin-left: 4px;">
                                     直连
                                 </span>
+                                <span v-else-if="source._testType === 'proxy'"
+                                    style="background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px; margin-left: 4px;">
+                                    中转
+                                </span>
                                 <span v-else
                                     style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px; margin-left: 4px;">
-                                    代理
+                                    服务
                                 </span>
                             </div>
                         </div>
@@ -3162,6 +3175,7 @@
                     imageMap: {}, fallbackMap: {}, heroList: [], scrollY: 0,
                     hotList: [],
                     sitesMap: {},  // 缓存站点信息（用于客户端测速）
+                    corsProxyUrl: null,  // CORS 代理 URL（用于中转无法直接访问的资源站 API）
                     playbackErrorCount: 0,  // 播放失败计数
                     isAutoRetrying: false,  // 是否正在自动重试
                     autoRetryMessage: '',  // 自动切换提示信息
@@ -3324,6 +3338,12 @@
                         const res = await fetch('/api/config');
                         const config = await res.json();
                         TMDB_API_KEY = config.tmdb_api_key;
+
+                        // 保存 CORS 代理 URL（用于资源站 API 中转）
+                        if (config.cors_proxy_url) {
+                            this.corsProxyUrl = config.cors_proxy_url;
+                            console.log('[Config] CORS 代理已配置:', config.cors_proxy_url);
+                        }
 
                         // Vercel 兼容性检测
                         if (config.enable_local_image_cache === false) {
@@ -4592,6 +4612,7 @@
 
                     const latencyPromises = this.currentGroup.sources.map(async (source) => {
                         source.latency = '...';
+                        source._useProxy = false;  // 默认不使用代理
                         try {
                             // 1. 先获取该线路的视频详情
                             const detailRes = await fetch(`/api/detail?site_key=${source.site_key}&id=${source.vod_id}`);
@@ -4639,34 +4660,101 @@
                             }
 
                             // 3. 用户端直接测试 m3u8 URL 的延迟
+                            let directSuccess = false;
+                            let directLatency = 0;
                             const startTime = Date.now();
-                            const controller = new AbortController();
-                            const timeoutId = setTimeout(() => controller.abort(), 5000);
+                            const SLOW_THRESHOLD = 1500; // 超过此延迟视为慢速
 
-                            // m3u8 文件通常配置了 CORS，可以直接 fetch
-                            const testRes = await fetch(videoUrl, {
-                                method: 'GET',
-                                cache: 'no-cache',
-                                signal: controller.signal
-                            });
+                            try {
+                                const controller = new AbortController();
+                                const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-                            clearTimeout(timeoutId);
+                                // m3u8 文件通常配置了 CORS，可以直接 fetch
+                                const testRes = await fetch(videoUrl, {
+                                    method: 'GET',
+                                    cache: 'no-cache',
+                                    signal: controller.signal
+                                });
 
-                            if (testRes.ok || testRes.type === 'cors') {
-                                source.latency = Date.now() - startTime;
+                                clearTimeout(timeoutId);
+
+                                if (testRes.ok || testRes.type === 'cors') {
+                                    directLatency = Date.now() - startTime;
+                                    source.latency = directLatency;
+                                    directSuccess = true;
+                                }
+                            } catch (directError) {
+                                // 直接访问失败，稍后尝试代理
+                                console.log(`[直接访问失败] ${source.site_name}: ${directError.message}`);
+                            }
+
+                            // 4. 如果直接访问失败，或者延迟太高，尝试代理
+                            const shouldTryProxy = !directSuccess || (directSuccess && directLatency > SLOW_THRESHOLD);
+
+                            if (shouldTryProxy && this.corsProxyUrl) {
+                                try {
+                                    const proxyUrl = `${this.corsProxyUrl}/?url=${encodeURIComponent(videoUrl)}`;
+                                    const proxyStartTime = Date.now();
+                                    const proxyController = new AbortController();
+                                    const proxyTimeoutId = setTimeout(() => proxyController.abort(), 6000);
+
+                                    const proxyTestRes = await fetch(proxyUrl, {
+                                        method: 'GET',
+                                        cache: 'no-cache',
+                                        signal: proxyController.signal
+                                    });
+
+                                    clearTimeout(proxyTimeoutId);
+
+                                    if (proxyTestRes.ok) {
+                                        const proxyLatency = Date.now() - proxyStartTime;
+
+                                        // 如果直连失败，使用代理
+                                        // 如果直连成功但代理更快（至少快 30%），使用代理
+                                        const useProxy = !directSuccess || (proxyLatency < directLatency * 0.7);
+
+                                        if (useProxy) {
+                                            source.latency = proxyLatency;
+                                            source._useProxy = true;  // 标记需要使用代理
+                                            source._proxyUrl = this.corsProxyUrl;
+
+                                            if (directSuccess) {
+                                                console.log(`[代理更快] ${source.site_name} (${proxyLatency}ms vs 直连 ${directLatency}ms)`);
+                                            } else {
+                                                console.log(`[代理成功] ${source.site_name} 通过代理访问 (${proxyLatency}ms)`);
+                                            }
+                                            directSuccess = true;
+                                        } else {
+                                            console.log(`[直连更优] ${source.site_name} 直连 ${directLatency}ms vs 代理 ${proxyLatency}ms`);
+                                        }
+                                    }
+                                } catch (proxyError) {
+                                    console.log(`[代理失败] ${source.site_name}: ${proxyError.message}`);
+                                }
+                            }
+
+                            // 5. 如果仍然失败，回退到服务器端测速
+                            if (!directSuccess) {
+                                try {
+                                    const checkRes = await fetch(`/api/check?key=${source.site_key}`);
+                                    const checkData = await checkRes.json();
+                                    source.latency = checkData.latency;
+                                    source._testType = 'server';
+                                } catch (e) {
+                                    source.latency = 9999;
+                                }
                             } else {
-                                source.latency = Date.now() - startTime;
+                                source._testType = source._useProxy ? 'proxy' : 'direct';
                             }
 
                             // 缓存详情数据，后续切换时可以复用
                             source._cachedDetail = detail;
-                            source._testType = 'direct';  // 用户端直接测速
 
                             // 每完成一个测速就检查是否可以提前返回
                             checkEarlyReturn();
 
                         } catch (e) {
-                            // 如果是 CORS 错误，尝试 no-cors 模式再测一次
+                            // 获取详情失败的兜底处理
                             if (e.name !== 'AbortError') {
                                 try {
                                     const detailRes = await fetch(`/api/detail?site_key=${source.site_key}&id=${source.vod_id}`);
@@ -4817,6 +4905,13 @@
                     console.log('[播放器] episodeList长度:', this.episodeList?.length);
                     console.log('[播放器] dp已存在:', !!dp);
 
+                    // 检查当前线路是否需要使用代理
+                    let finalUrl = url;
+                    if (this.currentSource && this.currentSource._useProxy && this.currentSource._proxyUrl) {
+                        finalUrl = `${this.currentSource._proxyUrl}/?url=${encodeURIComponent(url)}`;
+                        console.log('[播放器] 🌐 使用代理播放:', finalUrl.substring(0, 80) + '...');
+                    }
+
                     const setupErrorHandling = () => {
                         // 监听播放错误，自动切换到下一个可用线路
                         dp.on('error', () => {
@@ -4842,7 +4937,7 @@
                             volume: 0.8,             // 默认音量 80%
                             loop: false,             // 循环播放（可在设置中切换）
                             playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3],  // 0.25间隔倍速选项
-                            video: { url: url, type: 'hls' },
+                            video: { url: finalUrl, type: 'hls' },
                             contextmenu: [
                                 { text: '🎬 E视界MAX', link: '/' },
                                 { text: '⚡ 当前速度: 1x', click: () => { } }
@@ -5413,8 +5508,8 @@
 
                         let progressRestored = false;
 
-                        dp.switchVideo({ url: url, type: 'hls' });
-                        console.log('[进度记忆-切换] switchVideo 已调用');
+                        dp.switchVideo({ url: finalUrl, type: 'hls' });
+                        console.log('[进度记忆-切换] switchVideo 已调用' + (finalUrl !== url ? ' (代理模式)' : ''));
 
                         // 恢复新视频的进度
                         const restoreHandler = () => {

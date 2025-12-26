@@ -1,6 +1,6 @@
 // Service Worker with Image Caching for dongguaTV
-// v21: Fixed POST request cache error
-const CACHE_VERSION = 'v21';
+// v22: Fixed CORS proxy handling and null response errors
+const CACHE_VERSION = 'v22';
 const STATIC_CACHE = 'donggua-static-' + CACHE_VERSION;
 const IMAGE_CACHE = 'donggua-images-' + CACHE_VERSION;
 
@@ -62,6 +62,12 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
     const url = new URL(event.request.url);
 
+    // 跳过 CORS 代理请求（workers.dev 域名）
+    // 这些请求需要直接发送，不能被 Service Worker 干扰
+    if (url.hostname.includes('workers.dev')) {
+        return; // 让浏览器直接处理
+    }
+
     // 策略1：TMDB 图片 (包含官方域名和本地反代) - Cache First
     if (IMAGE_HOSTS.some(host => url.hostname.includes(host)) || url.pathname.startsWith('/api/tmdb-image')) {
         event.respondWith(handleImageRequest(event.request));
@@ -80,7 +86,12 @@ self.addEventListener('fetch', event => {
                     });
                     return response;
                 })
-                .catch(() => caches.match(event.request))
+                .catch(() => {
+                    return caches.match(event.request).then(cached => {
+                        // 确保返回有效的 Response，如果缓存也没有则返回离线页面
+                        return cached || new Response('Offline', { status: 503, statusText: 'Service Unavailable' });
+                    });
+                })
         );
         return;
     }
@@ -96,7 +107,7 @@ self.addEventListener('fetch', event => {
                             cache.put(event.request, response.clone());
                         }
                         return response;
-                    });
+                    }).catch(() => cached); // 网络失败时返回缓存
                     // 返回缓存（如果有），同时后台更新
                     return cached || fetchPromise;
                 });
@@ -128,7 +139,12 @@ self.addEventListener('fetch', event => {
                 }
                 return response;
             })
-            .catch(() => caches.match(event.request))
+            .catch(() => {
+                return caches.match(event.request).then(cached => {
+                    // 确保返回有效的 Response
+                    return cached || new Response('Network Error', { status: 503 });
+                });
+            })
     );
 });
 
